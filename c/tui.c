@@ -164,6 +164,7 @@ static int64_t K2SC(char ch) {
       defined(__OpenBSD__) || defined(__NetBSD__)
 #    include <SDL.h>
 #    include <sys/ioctl.h>
+#    include <sys/select.h>
 #    include <termios.h>
 #    include <unistd.h>
 static struct termios orig_termios;
@@ -175,7 +176,7 @@ static void enableRawMode() {
   raw.c_cflag |= (CS8);
   raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
   raw.c_cc[VMIN] = 0;
-  raw.c_cc[VTIME] = 1;
+  raw.c_cc[VTIME] = 0;  // 0, change to non-blocking I/O
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 static void disableRawMode() {
@@ -187,6 +188,22 @@ static int ReadChr() {
   char c;
   if (1 == read(STDIN_FILENO, &c, 1))
     return c;
+  return 0;
+}
+
+static int WaitForInput(int timeout_ms) {
+  fd_set readfds;
+  struct timeval tv;
+  FD_ZERO(&readfds);
+  FD_SET(STDIN_FILENO, &readfds);
+  tv.tv_sec = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
+  return select(STDIN_FILENO + 1, &readfds, NULL, NULL, &tv);
+}
+
+static int ReadChrWithTimeout(int timeout_ms) {
+  if (WaitForInput(timeout_ms) > 0)
+    return ReadChr();
   return 0;
 }
 
@@ -206,8 +223,12 @@ static int InputThread(void *ul) {
   int a, b, c2, ptr;
   int ms;
   while (!*(uint64_t *)ul) {
+    if (WaitForInput(10) <= 0) {
+      continue;
+    }
     flags = 0;
     c = ReadChr();
+    if (!c) continue;
     if (c == 127) {
       SendOut(CH_BACKSPACE, K2SC(CH_BACKSPACE));
       continue;
@@ -223,11 +244,11 @@ static int InputThread(void *ul) {
       continue;
     }
     if (c == 27) {
-      c = ReadChr();
+      c = ReadChrWithTimeout(5);
       if (c == '[') {
         // https://en.wikipedia.org/wiki/ANSI_escape_code
         for (ptr = 0; ptr < 255; ptr++) {
-          c = ReadChr();
+          c = ReadChrWithTimeout(5);
           if (!c)
             break;
           buf[ptr] = c;
@@ -369,7 +390,7 @@ static int InputThread(void *ul) {
         SendOut(CH_ESC, SC_ESC);
       else if (c) {
         if (c == 'O') {
-          switch (c = ReadChr()) {
+          switch (c = ReadChrWithTimeout(5)) {
           case 'P':
             goto f1;
           case 'Q':
